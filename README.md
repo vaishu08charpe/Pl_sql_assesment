@@ -1,1 +1,1 @@
-# Pl_sql_assesment
+# Minor_Projects
