@@ -1,0 +1,419 @@
+--Project--> "Sales Analytics Platform"
+
+--Problem Statement-->In real companies, sales data comes from multiple systems in raw formats and cannot be used directly. This project simulates a real-world analytics pipeline to convert raw data into trusted, fast, and business-ready insights.
+
+--Objective --> Sales Analytics Platform is an end-to-end data pipeline that ingests raw sales data, cleans and transforms it, and delivers optimized analytics for business decision-making.
+
+--Raw JSON → clean data → analytics → monitoring
+
+--Phase-01 --> schema design
+--Goal--> to understand the business requirements and translate them into a well-defined ELT architecture, data model, and design blueprint for the analytics platform.
+
+--create and use database
+create database sales_analytics;
+use sales_analytics;
+
+-- Raw data schemas 
+CREATE SCHEMA raw;     --Store data exactly as source
+CREATE SCHEMA staging;    --Clean data, Apply business rules
+CREATE SCHEMA production;     --Analytics-ready data, Optimized queries
+
+--create file format
+CREATE OR REPLACE FILE FORMAT json_ff
+TYPE = 'JSON'
+STRIP_OUTER_ARRAY = TRUE;
+
+--create internal stage
+CREATE OR REPLACE STAGE sales_stage
+FILE_FORMAT = json_ff;
+
+
+--Phase-02 --> create staging tables
+--Goal--> to set up a secure, well-structured, and cost-optimized Snowflake environment including warehouses, schemas, stages, and file formats before ingesting data.
+
+
+--create staging tables
+--Raw tables store JSON as-is. Staging tables convert that JSON into structured, typed, and validated data which is required for analytics and joins.
+--why json-->Schema flexible, JSON easily store hota hai
+
+--create table customer
+CREATE OR REPLACE TABLE raw.customers (
+  raw_data VARIANT
+);
+
+--create table transactions
+CREATE OR REPLACE TABLE raw.transactions (
+  raw_data VARIANT
+);
+
+--create table products
+CREATE OR REPLACE TABLE raw.products (
+  raw_data VARIANT
+);
+
+--verify
+SHOW DATABASES;
+SHOW SCHEMAS IN DATABASE sales_analytics;
+SHOW STAGES;
+SHOW FILE FORMATS;
+SHOW TABLES IN SCHEMA raw;
+
+--Phase-03 --> load data
+--Goal--> to ingest source JSON data into the raw layer in Snowflake exactly as received, ensuring reliable, auditable, and     duplicate-safe data loading.
+
+--upload json files in internal sales_stage using GUI
+--why json-->Schema flexible,JSON easily store hota hai,Future schema changes safe
+
+
+--verify loaded json file if present in stages or not
+LIST @raw.sales_stage;
+
+
+--loading data into raw tables using copy into command
+
+--load data into customers table
+COPY INTO raw.customers
+FROM @raw.sales_stage/customers.json
+FILE_FORMAT = json_ff;
+
+--load data into transaction table
+COPY INTO raw.transactions
+FROM @raw.sales_stage/transactions.json
+FILE_FORMAT = json_ff;
+
+--load data into products table
+COPY INTO raw.products
+FROM @raw.sales_stage/products.json
+FILE_FORMAT = json_ff;
+
+
+--check if file is successfully loaded or not
+
+--check if file is loaded into customers table
+SELECT *
+FROM TABLE(INFORMATION_SCHEMA.COPY_HISTORY(
+    TABLE_NAME => 'CUSTOMERS',
+    START_TIME => DATEADD('hour', -1, CURRENT_TIMESTAMP())
+));
+
+
+--check if file if loaded into transactions table
+SELECT *
+FROM TABLE(INFORMATION_SCHEMA.COPY_HISTORY(
+    TABLE_NAME => 'TRANSACTIONS',
+    START_TIME => DATEADD('hour', -1, CURRENT_TIMESTAMP())
+));
+
+
+--check if file if loaded into products table 
+SELECT *
+FROM TABLE(INFORMATION_SCHEMA.COPY_HISTORY(
+    TABLE_NAME => 'PRODUCTS',
+    START_TIME => DATEADD('hour', -1, CURRENT_TIMESTAMP())
+));
+
+
+--Phase-04 --> Transformation 
+--Goal --> to transform raw semi-structured data into clean, typed, and validated staging tables by applying business rules and data quality checks, ensuring reliable analytics downstream.
+
+
+--row count check in tables 
+SELECT COUNT(*) FROM raw.customers;
+SELECT COUNT(*) FROM raw.transactions;
+SELECT COUNT(*) FROM raw.products;
+
+
+SELECT
+  raw_data:customer_id,
+  raw_data:name,
+  raw_data:email
+FROM raw.customers;
+
+
+--create staging tables
+
+--I created staging tables to convert semi-structured raw data into clean, typed, and validated datasets. This separation improves data quality, performance, and maintainability while keeping the raw layer immutable.
+
+
+--staging customers
+CREATE OR REPLACE TABLE staging.customers AS
+SELECT
+  raw_data:customer_id::INT        AS customer_id,
+  raw_data:name::STRING            AS name,
+  raw_data:email::STRING           AS email,
+  raw_data:country::STRING         AS country,
+  raw_data:created_at::TIMESTAMP   AS created_at,
+  CURRENT_TIMESTAMP()              AS loaded_at
+FROM raw.customers;
+
+--staging transactions
+CREATE OR REPLACE TABLE staging.transactions AS
+SELECT
+  raw_data:transaction_id::INT        AS transaction_id,
+  raw_data:customer_id::INT           AS customer_id,
+  raw_data:product_id::INT            AS product_id,
+  raw_data:quantity::INT              AS quantity,
+  raw_data:unit_price::DECIMAL(10,2)  AS unit_price,
+  raw_data:quantity::INT 
+    * raw_data:unit_price::DECIMAL(10,2) AS transaction_total,
+  raw_data:transaction_date::DATE     AS transaction_date,
+  CURRENT_TIMESTAMP()                 AS loaded_at
+FROM raw.transactions;
+
+
+--staging products
+CREATE OR REPLACE TABLE staging.products AS
+SELECT
+  raw_data:product_id::INT         AS product_id,
+  raw_data:product_name::STRING   AS product_name,
+  raw_data:category::STRING       AS category,
+  raw_data:unit_price::DECIMAL(10,2) AS unit_price,
+  raw_data:supplier_id::INT       AS supplier_id,
+  CURRENT_TIMESTAMP()             AS loaded_at
+FROM raw.products;
+
+
+--validate staging data
+SELECT COUNT(*) FROM staging.customers;
+SELECT COUNT(*) FROM staging.transactions;
+SELECT COUNT(*) FROM staging.products;
+
+
+--validate data quality      --Customer count,Transaction count,Null customer_id     --Validation prevents bad data from reaching analytics.
+CREATE OR REPLACE PROCEDURE staging.validate_data()
+RETURNS STRING
+LANGUAGE SQL
+AS
+$$
+DECLARE
+    v_customer_count INT;
+    v_transaction_count INT;
+    v_null_customer_count INT;
+BEGIN
+    -- Count customers
+    SELECT COUNT(*) 
+    INTO :v_customer_count 
+    FROM staging.customers;
+
+    -- Count transactions
+    SELECT COUNT(*) 
+    INTO :v_transaction_count 
+    FROM staging.transactions;
+
+    -- Check null customer_id in transactions
+    SELECT COUNT(*) 
+    INTO :v_null_customer_count
+    FROM staging.transactions
+    WHERE customer_id IS NULL;
+
+    -- Return summary
+    RETURN 
+        'Customers: ' || v_customer_count ||
+        ', Transactions: ' || v_transaction_count ||
+        ', Null customer_id in transactions: ' || v_null_customer_count;
+END;
+$$;
+
+
+CALL staging.validate_data();
+
+
+
+--Phase-05 --> Production Analytics
+--Goal --> Convert clean staging data into analytics-ready business tables that are fast, optimized, and reusable.
+
+---- Fact table: daily sales  
+---Fact table numbers (measures) store karti hai.   --- quantity_sold,total_sales, transaction_count
+CREATE OR REPLACE TABLE production.fact_sales AS
+SELECT
+    t.transaction_date        AS sales_date,
+    c.customer_id             AS customer_id,
+    p.product_id              AS product_id,
+    p.category                AS category,
+    c.country                 AS country,
+    SUM(t.quantity)           AS quantity_sold,
+    SUM(t.transaction_total)  AS total_sales,
+    COUNT(DISTINCT t.transaction_id) AS transaction_count
+FROM staging.transactions t
+JOIN staging.customers c
+    ON t.customer_id = c.customer_id
+JOIN staging.products p
+    ON t.product_id = p.product_id
+GROUP BY
+    t.transaction_date,
+    c.customer_id,
+    p.product_id,
+    p.category,
+    c.country;
+
+
+--add clustering for this table       --Improves query performance,Reduces micro-partition scans
+ALTER TABLE production.fact_sales
+CLUSTER BY (sales_date, product_id);
+
+--verify
+SELECT * 
+FROM production.fact_sales
+LIMIT 5;
+
+--create table
+--Dimension table descriptive information store karti hai.--name,email,id,country
+CREATE OR REPLACE TABLE production.dim_customers AS
+SELECT
+    c.customer_id,
+    c.name,
+    c.email,
+    c.country,
+    c.created_at,
+    COUNT(DISTINCT t.transaction_id) AS lifetime_transactions,
+    COALESCE(SUM(t.transaction_total), 0) AS lifetime_value,
+    MAX(t.transaction_date) AS last_purchase_date
+FROM staging.customers c
+LEFT JOIN staging.transactions t
+    ON c.customer_id = t.customer_id
+GROUP BY
+    c.customer_id,
+    c.name,
+    c.email,
+    c.country,
+    c.created_at;
+
+--verify
+SELECT * 
+FROM production.dim_customers;
+
+--Create analytics view
+--No data duplication,Always up-to-date
+--create view
+--“Daily basis pe sales performance kya hai
+CREATE OR REPLACE VIEW production.vw_daily_sales AS
+SELECT
+    sales_date,
+    SUM(total_sales) AS daily_total,
+    COUNT(DISTINCT customer_id) AS unique_customers,
+    SUM(quantity_sold) AS units_sold,
+    ROUND(
+        SUM(total_sales) / NULLIF(COUNT(DISTINCT customer_id), 0),
+        2
+    ) AS avg_order_value
+FROM production.fact_sales
+GROUP BY sales_date
+ORDER BY sales_date DESC;
+
+--verify
+SELECT * FROM production.vw_daily_sales;
+
+--create view
+--Kaunsa product sabse zyada revenue la raha hai
+CREATE OR REPLACE VIEW production.vw_top_products AS
+SELECT
+    product_id,
+    category,
+    SUM(quantity_sold) AS total_quantity,
+    SUM(total_sales) AS total_sales,
+    ROUND(
+        100.0 * SUM(total_sales) /
+        SUM(SUM(total_sales)) OVER (),
+        2
+    ) AS pct_of_sales
+FROM production.fact_sales
+GROUP BY product_id, category
+ORDER BY total_sales DESC;
+
+
+--verify
+SELECT * FROM production.vw_top_products;
+
+--create view
+--Hamare best customers kaun hain
+CREATE OR REPLACE VIEW production.vw_customer_segments AS
+SELECT
+    CASE
+        WHEN lifetime_value >= 10000 THEN 'VIP'
+        WHEN lifetime_value >= 5000  THEN 'Gold'
+        WHEN lifetime_value >= 1000  THEN 'Silver'
+        ELSE 'Bronze'
+    END AS segment,
+    COUNT(*) AS customer_count,
+    ROUND(SUM(lifetime_value), 2) AS segment_total_value,
+    ROUND(AVG(lifetime_value), 2) AS avg_customer_value,
+    MAX(last_purchase_date) AS most_recent_purchase
+FROM production.dim_customers
+WHERE lifetime_transactions > 0
+GROUP BY segment
+ORDER BY segment_total_value DESC;
+
+
+--verify
+SELECT * FROM production.vw_customer_segments;
+
+
+--final validation
+SELECT COUNT(*) FROM production.fact_sales;
+SELECT COUNT(*) FROM production.dim_customers;
+
+
+--Phase-06 --> Monitoring and Optimization
+--Goal --> We create a monitoring table to track whether data pipelines ran successfully, how much data was loaded, and when—so analytics can be trusted.
+
+--create monitoring table --Debug failures
+CREATE OR REPLACE TABLE production.load_audit (
+    load_timestamp     TIMESTAMP,
+    layer_name         STRING,
+    table_name         STRING,
+    row_count          INT,
+    success_indicator  BOOLEAN
+);
+
+--insert records in audit staging table
+INSERT INTO production.load_audit
+SELECT
+    CURRENT_TIMESTAMP(),
+    'STAGING',
+    'CUSTOMERS',
+    (SELECT COUNT(*) FROM staging.customers),
+    TRUE;
+
+INSERT INTO production.load_audit
+SELECT
+    CURRENT_TIMESTAMP(),
+    'STAGING',
+    'TRANSACTIONS',
+    (SELECT COUNT(*) FROM staging.transactions),
+    TRUE;
+
+INSERT INTO production.load_audit
+SELECT
+    CURRENT_TIMESTAMP(),
+    'STAGING',
+    'PRODUCTS',
+    (SELECT COUNT(*) FROM staging.products),
+    TRUE;
+
+
+--audit production table
+INSERT INTO production.load_audit
+SELECT
+    CURRENT_TIMESTAMP(),
+    'PRODUCTION',
+    'FACT_SALES',
+    (SELECT COUNT(*) FROM production.fact_sales),
+    TRUE;
+
+INSERT INTO production.load_audit
+SELECT
+    CURRENT_TIMESTAMP(),
+    'PRODUCTION',
+    'DIM_CUSTOMERS',
+    (SELECT COUNT(*) FROM production.dim_customers),
+    TRUE;
+
+--verify
+SELECT * FROM production.load_audit
+ORDER BY load_timestamp DESC;
+
+
+--final check
+SELECT * FROM production.vw_daily_sales;
+SELECT * FROM production.vw_top_products;
+SELECT * FROM production.vw_customer_segments;
